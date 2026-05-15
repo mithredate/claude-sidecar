@@ -10,8 +10,8 @@ A Docker image with Claude Code that delegates command execution to sidecar cont
 
 ```bash
 claude
-/plugin add marketplace mithredate/claude-codex
-/plugin install development@claude-codex
+/plugin add marketplace mithredate/skills
+/plugin install dev@skills
 # Then type: install claude-sidecar
 ```
 
