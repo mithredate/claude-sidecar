@@ -28,13 +28,32 @@ type ProjectMount struct {
 // GenerateOverlay writes a Compose YAML fragment describing the claude-sidecar
 // setup (services, mounts, shadows) for the given spec.
 func GenerateOverlay(spec OverlaySpec, w io.Writer) error {
+	claudeVolumes := []string{
+		fmt.Sprintf("%s:/workspaces/%s", spec.Project.HostPath, spec.Project.Name),
+		"claude-home:/home/claude",
+	}
 	doc := map[string]any{
 		"services": map[string]any{
 			"claude-sidecar": map[string]any{
-				"image": spec.Image,
-				"volumes": []string{
-					fmt.Sprintf("%s:/workspaces/%s", spec.Project.HostPath, spec.Project.Name),
+				"image":   spec.Image,
+				"volumes": claudeVolumes,
+			},
+			"claude-sidecar-proxy": map[string]any{
+				"image": "tecnativa/docker-socket-proxy",
+				"environment": map[string]any{
+					"CONTAINERS": 1,
+					"EXEC":       1,
+					"POST":       1,
 				},
+				"volumes": []string{
+					"/var/run/docker.sock:/var/run/docker.sock:ro",
+				},
+			},
+		},
+		"volumes": map[string]any{
+			"claude-home": map[string]any{
+				"name":     "claude-sidecar-home",
+				"external": true,
 			},
 		},
 	}

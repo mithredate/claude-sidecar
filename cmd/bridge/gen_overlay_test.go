@@ -71,3 +71,43 @@ func TestGenerateOverlay_EmitsClaudeSidecarServiceWithProjectMount(t *testing.T)
 		t.Errorf("expected project bind-mount in volumes, got: %v", svc.Volumes)
 	}
 }
+
+func TestGenerateOverlay_EmitsSocketProxyAndSharedHomeVolume(t *testing.T) {
+	spec := OverlaySpec{
+		Image:   "img",
+		Project: ProjectMount{HostPath: "/p", Name: "p"},
+	}
+	var buf bytes.Buffer
+	if err := GenerateOverlay(spec, &buf); err != nil {
+		t.Fatalf("GenerateOverlay returned error: %v", err)
+	}
+	doc := parseOverlay(t, buf.Bytes())
+
+	if _, ok := doc.Services["claude-sidecar-proxy"]; !ok {
+		t.Errorf("expected service 'claude-sidecar-proxy', got: %v", keysOf(doc.Services))
+	}
+
+	claudeHome, ok := doc.Volumes["claude-home"]
+	if !ok {
+		t.Fatalf("expected volume 'claude-home' declared at top-level, got: %v", keysOf(doc.Volumes))
+	}
+	if claudeHome.Name != "claude-sidecar-home" || !claudeHome.External {
+		t.Errorf("claude-home: got name=%q external=%v want name=%q external=true",
+			claudeHome.Name, claudeHome.External, "claude-sidecar-home")
+	}
+
+	svc := doc.Services["claude-sidecar"]
+	if !volumeContains(svc.Volumes, "claude-home:/home/claude") {
+		t.Errorf("expected claude-sidecar to mount claude-home, got volumes: %v", svc.Volumes)
+	}
+}
+
+// keysOf returns the keys of a map for nicer test failure output. Generics
+// require Go 1.18+; the module uses 1.24, so this is safe.
+func keysOf[K comparable, V any](m map[K]V) []K {
+	out := make([]K, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
