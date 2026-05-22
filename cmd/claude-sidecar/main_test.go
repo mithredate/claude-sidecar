@@ -111,6 +111,78 @@ func (s *sandbox) docker() string {
 	return string(b)
 }
 
+func TestRun_Exec_CallsComposeExecAgainstClaudeSidecar(t *testing.T) {
+	s := newSandbox(t)
+	s.writeCfg("config.yaml", "image: img\nhost_network: false\n")
+	s.writeProj("compose.sidecar.yml", "services: {}\n") // already up'd
+
+	_, stderr, code := s.run("exec", "ls", "-la")
+	if code != 0 {
+		t.Fatalf("exit: %d, stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"compose", "exec", "claude-sidecar", "ls", "-la"} {
+		if !strings.Contains(s.docker(), "ARG: "+want) {
+			t.Errorf("expected docker arg %q, log:\n%s", want, s.docker())
+		}
+	}
+}
+
+func TestRun_Bare_RunsClaudeInsideContainer(t *testing.T) {
+	s := newSandbox(t)
+	s.writeCfg("config.yaml", "image: img\nhost_network: false\n")
+	s.writeProj("compose.sidecar.yml", "services: {}\n")
+
+	_, stderr, code := s.run()
+	if code != 0 {
+		t.Fatalf("exit: %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(s.docker(), "ARG: claude") {
+		t.Errorf("expected 'claude' to be passed as the command; log:\n%s", s.docker())
+	}
+	if !strings.Contains(s.docker(), "ARG: claude-sidecar") {
+		t.Errorf("expected target service 'claude-sidecar'; log:\n%s", s.docker())
+	}
+}
+
+func TestRun_Exec_WarnsOnShadowDrift(t *testing.T) {
+	s := newSandbox(t)
+	s.writeCfg("config.yaml", "image: img\nhost_network: false\n")
+	s.writeProj("compose.sidecar.yml", "services: {}\n")
+	s.writeProj(".sidecar/shadow", ".env\n")
+	// Stored hash that doesn't match current shadow:
+	stateDir := filepath.Join(s.cfgDir, "state")
+	_ = os.MkdirAll(stateDir, 0o755)
+	_ = os.WriteFile(filepath.Join(stateDir, filepath.Base(s.projDir)+".sha"),
+		[]byte("bogus-prior-hash\n"), 0o644)
+
+	_, stderr, code := s.run("exec", "ls")
+	if code != 0 {
+		t.Fatalf("exit (drift should still proceed): %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "drift") {
+		t.Errorf("expected stderr to mention drift, got: %s", stderr)
+	}
+}
+
+func TestRun_Exec_SilentWhenNoDrift(t *testing.T) {
+	s := newSandbox(t)
+	s.writeCfg("config.yaml", "image: img\nhost_network: false\n")
+	s.writeProj("compose.sidecar.yml", "services: {}\n")
+	s.writeProj(".sidecar/shadow", ".env\n")
+	// First an `up` to record the matching hash:
+	if _, _, code := s.run("up"); code != 0 {
+		t.Fatalf("up failed; can't test no-drift path")
+	}
+
+	_, stderr, code := s.run("exec", "ls")
+	if code != 0 {
+		t.Fatalf("exit: %d, stderr: %s", code, stderr)
+	}
+	if strings.Contains(stderr, "drift") {
+		t.Errorf("expected no drift warning; got stderr: %s", stderr)
+	}
+}
+
 func TestRun_Up_WritesOverlayFileAndCallsComposeUp(t *testing.T) {
 	s := newSandbox(t)
 	s.writeCfg("config.yaml", `image: img

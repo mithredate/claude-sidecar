@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/mithredate/claude-sidecar/internal/overlay"
 )
@@ -50,10 +51,49 @@ func Run(args []string, env Env) int {
 		return cmdGenOverlay(env, args)
 	case "up":
 		return cmdUp(env, args)
+	case "exec":
+		return cmdExec(env, args)
+	case "":
+		return cmdExec(env, []string{"claude"})
 	default:
-		fmt.Fprintf(env.Stderr, "claude-sidecar: unknown subcommand %q (try: gen-overlay, up)\n", sub)
+		fmt.Fprintf(env.Stderr, "claude-sidecar: unknown subcommand %q (try: gen-overlay, up, exec)\n", sub)
 		return 1
 	}
+}
+
+func cmdExec(env Env, args []string) int {
+	cfg, err := loadConfig(env)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "claude-sidecar: %s\n", err)
+		return 1
+	}
+	// Non-fatal drift check.
+	if drift, _ := checkDrift(env.WorkDir, cfg); drift {
+		fmt.Fprintln(env.Stderr,
+			"claude-sidecar: WARNING shadow drift detected since last `up` — run `claude-sidecar up` to apply")
+	}
+	composeArgs := append(composeFiles(env.WorkDir),
+		append([]string{"exec", "claude-sidecar"}, args...)...)
+	return runDockerCompose(env, env.WorkDir, nil, composeArgs)
+}
+
+// checkDrift returns true if the current shadow hash differs from the one
+// recorded at the last `up`. An absent state file (never up'd) is "no drift".
+func checkDrift(projRoot string, cfg config) (bool, error) {
+	statePath := filepath.Join(cfgDir(), "state", filepath.Base(projRoot)+".sha")
+	prior, err := os.ReadFile(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	in, err := collectHashInputs(projRoot, cfg)
+	if err != nil {
+		return false, err
+	}
+	current := shadowHash(in)
+	return strings.TrimSpace(string(prior)) != current, nil
 }
 
 func cmdUp(env Env, args []string) int {
