@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,13 +29,13 @@ type ProjectMount struct {
 // GenerateOverlay writes a Compose YAML fragment describing the claude-sidecar
 // setup (services, mounts, shadows) for the given spec.
 func GenerateOverlay(spec OverlaySpec, w io.Writer) error {
-	claudeVolumes := []string{
+	claudeVolumes := []any{
 		fmt.Sprintf("%s:/workspaces/%s", spec.Project.HostPath, spec.Project.Name),
 		"claude-home:/home/claude",
 		fmt.Sprintf("%s/.credentials.json:/run/seed/.credentials.json:ro", spec.Project.HostPath),
 	}
 	for _, p := range spec.Project.ShadowPaths {
-		claudeVolumes = append(claudeVolumes, shadowMount("/workspaces/"+spec.Project.Name, p))
+		claudeVolumes = append(claudeVolumes, shadowEntry("/workspaces/"+spec.Project.Name, p))
 	}
 	doc := map[string]any{
 		"services": map[string]any{
@@ -67,9 +68,19 @@ func GenerateOverlay(spec OverlaySpec, w io.Writer) error {
 	return enc.Encode(doc)
 }
 
-// shadowMount returns a Compose volume string that bind-mounts /dev/null over
-// a file under the given container mount path. Directory shadows (trailing
-// '/') are handled in a later behavior.
-func shadowMount(containerMountRoot, relPath string) string {
-	return fmt.Sprintf("/dev/null:%s/%s", containerMountRoot, relPath)
+// shadowEntry returns a Compose volume entry that hides the given path. For
+// files (no trailing '/'), returns a short-form string mounting /dev/null. For
+// directories (trailing '/'), returns a long-form tmpfs mount (Docker rejects
+// /dev/null over a directory). The trailing slash is stripped from the target.
+func shadowEntry(containerMountRoot, relPath string) any {
+	isDir := strings.HasSuffix(relPath, "/")
+	relPath = strings.TrimRight(relPath, "/")
+	target := containerMountRoot + "/" + relPath
+	if isDir {
+		return map[string]any{
+			"type":   "tmpfs",
+			"target": target,
+		}
+	}
+	return "/dev/null:" + target
 }

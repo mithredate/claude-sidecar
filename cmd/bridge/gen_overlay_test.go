@@ -17,7 +17,7 @@ type composeDoc struct {
 }
 type composeService struct {
 	Image       string            `yaml:"image"`
-	Volumes     []string          `yaml:"volumes"`
+	Volumes     []any             `yaml:"volumes"` // mixed short (string) and long (map) forms
 	Environment map[string]string `yaml:"environment"`
 	WorkingDir  string            `yaml:"working_dir"`
 	NetworkMode string            `yaml:"network_mode"`
@@ -37,13 +37,31 @@ func parseOverlay(t *testing.T, b []byte) composeDoc {
 	return doc
 }
 
-func volumeContains(vols []string, needle string) bool {
+func volumeContains(vols []any, needle string) bool {
 	for _, v := range vols {
-		if strings.Contains(v, needle) {
+		if s, ok := v.(string); ok && strings.Contains(s, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+// tmpfsVolumeTargets returns the 'target' of every long-form tmpfs volume.
+func tmpfsVolumeTargets(vols []any) []string {
+	var out []string
+	for _, v := range vols {
+		m, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		if m["type"] != "tmpfs" {
+			continue
+		}
+		if t, ok := m["target"].(string); ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func TestGenerateOverlay_EmitsClaudeSidecarServiceWithProjectMount(t *testing.T) {
@@ -117,6 +135,44 @@ func TestGenerateOverlay_EmitsCredentialsSeedBindMount(t *testing.T) {
 	wantMount := "/host/foo/.credentials.json:/run/seed/.credentials.json:ro"
 	if !volumeContains(svc.Volumes, wantMount) {
 		t.Errorf("expected credentials seed bind-mount %q in volumes, got: %v", wantMount, svc.Volumes)
+	}
+}
+
+func TestGenerateOverlay_ShadowsCurrentProjectDirsViaTmpfs(t *testing.T) {
+	spec := OverlaySpec{
+		Image: "img",
+		Project: ProjectMount{
+			HostPath:    "/host/foo",
+			Name:        "foo",
+			ShadowPaths: []string{"secrets/", "config/local/"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := GenerateOverlay(spec, &buf); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	doc := parseOverlay(t, buf.Bytes())
+
+	got := tmpfsVolumeTargets(doc.Services["claude-sidecar"].Volumes)
+	want := []string{"/workspaces/foo/secrets", "/workspaces/foo/config/local"}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected tmpfs target %q, got tmpfs targets: %v (all volumes: %v)",
+				w, got, doc.Services["claude-sidecar"].Volumes)
+		}
+	}
+	// Ensure trailing slash is stripped (no double-slash in target).
+	for _, g := range got {
+		if strings.HasSuffix(g, "/") {
+			t.Errorf("tmpfs target %q should not have trailing slash", g)
+		}
 	}
 }
 
