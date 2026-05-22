@@ -119,6 +119,68 @@ YAML
     teardown_sandbox
 }
 
+test_spec_carries_current_project_shadow_paths() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+    mkdir -p "$SANDBOX/project/.sidecar"
+    cat > "$SANDBOX/project/.sidecar/shadow" <<'EOF'
+.env
+.credentials.json
+# this is a comment, should be skipped
+
+secrets/
+EOF
+
+    run_wrapper gen-overlay >/dev/null 2>&1
+    spec="$(docker_stdin)"
+    assert_contains "$spec" ".env" "spec includes .env shadow"
+    assert_contains "$spec" ".credentials.json" "spec includes .credentials.json shadow"
+    assert_contains "$spec" "secrets/" "spec includes secrets/ dir shadow"
+    # Comment line should be filtered:
+    case "$spec" in *"# this is a comment"*) fail "comments should be filtered from shadow paths" ;; esac
+
+    teardown_sandbox
+}
+
+test_spec_carries_extra_mounts_and_their_shadows() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<YAML
+image: img
+host_network: false
+extra_mounts:
+  - $SANDBOX/mobile
+YAML
+    mkdir -p "$SANDBOX/mobile/.sidecar"
+    printf 'firebase.json\nsecrets/\n' > "$SANDBOX/mobile/.sidecar/shadow"
+
+    run_wrapper gen-overlay >/dev/null 2>&1
+    spec="$(docker_stdin)"
+
+    assert_contains "$spec" "host_path: $SANDBOX/mobile" "spec lists extra-mount host path"
+    assert_contains "$spec" "name: mobile" "spec sets extra-mount name from basename"
+    assert_contains "$spec" "firebase.json" "spec includes extra-mount shadow file"
+    assert_contains "$spec" "secrets/" "spec includes extra-mount dir shadow"
+
+    teardown_sandbox
+}
+
+test_spec_propagates_host_network_true() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: true
+YAML
+
+    run_wrapper gen-overlay >/dev/null 2>&1
+    spec="$(docker_stdin)"
+    assert_contains "$spec" "host_network: true" "spec carries host_network: true"
+
+    teardown_sandbox
+}
+
 # ---- runner ----------------------------------------------------------------
 
 run_all() {
