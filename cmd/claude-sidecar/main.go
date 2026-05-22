@@ -48,10 +48,64 @@ func Run(args []string, env Env) int {
 	switch sub {
 	case "gen-overlay":
 		return cmdGenOverlay(env, args)
+	case "up":
+		return cmdUp(env, args)
 	default:
-		fmt.Fprintf(env.Stderr, "claude-sidecar: unknown subcommand %q (try: gen-overlay)\n", sub)
+		fmt.Fprintf(env.Stderr, "claude-sidecar: unknown subcommand %q (try: gen-overlay, up)\n", sub)
 		return 1
 	}
+}
+
+func cmdUp(env Env, args []string) int {
+	cfg, err := loadConfig(env)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "claude-sidecar: %s\n", err)
+		return 1
+	}
+	spec, err := buildSpec(cfg, env.WorkDir)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "claude-sidecar: build spec: %s\n", err)
+		return 1
+	}
+
+	// Write the overlay file.
+	overlayPath := filepath.Join(env.WorkDir, "compose.sidecar.yml")
+	f, err := os.Create(overlayPath)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "claude-sidecar: create overlay: %s\n", err)
+		return 1
+	}
+	if err := overlay.Generate(spec, f); err != nil {
+		f.Close()
+		fmt.Fprintf(env.Stderr, "claude-sidecar: write overlay: %s\n", err)
+		return 1
+	}
+	f.Close()
+
+	// Record the drift hash so subsequent `exec` calls can detect divergence.
+	if err := writeDriftHash(env.WorkDir, cfg); err != nil {
+		fmt.Fprintf(env.Stderr, "claude-sidecar: record drift hash: %s\n", err)
+		return 1
+	}
+
+	// docker compose -f ... up -d (forwarding any extra args the user passed).
+	composeArgs := append(composeFiles(env.WorkDir), append([]string{"up", "-d"}, args...)...)
+	return runDockerCompose(env, env.WorkDir, nil, composeArgs)
+}
+
+// writeDriftHash records the SHA-256 of all relevant shadow contents under
+// the config's state/<project>.sha file.
+func writeDriftHash(projRoot string, cfg config) error {
+	in, err := collectHashInputs(projRoot, cfg)
+	if err != nil {
+		return err
+	}
+	stateDir := filepath.Join(cfgDir(), "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(stateDir, filepath.Base(projRoot)+".sha")
+	return os.WriteFile(path, []byte(shadowHash(in)+"\n"), 0o644)
 }
 
 func cmdGenOverlay(env Env, _ []string) int {

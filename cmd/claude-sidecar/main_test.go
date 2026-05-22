@@ -111,6 +111,60 @@ func (s *sandbox) docker() string {
 	return string(b)
 }
 
+func TestRun_Up_WritesOverlayFileAndCallsComposeUp(t *testing.T) {
+	s := newSandbox(t)
+	s.writeCfg("config.yaml", `image: img
+host_network: false
+`)
+	s.writeProj("compose.yml", "services: {app: {image: alpine}}\n")
+
+	_, stderr, code := s.run("up")
+	if code != 0 {
+		t.Fatalf("exit: %d, stderr: %s", code, stderr)
+	}
+
+	// compose.sidecar.yml must exist at project root
+	overlayPath := filepath.Join(s.projDir, "compose.sidecar.yml")
+	if _, err := os.Stat(overlayPath); err != nil {
+		t.Errorf("expected %s to exist: %v", overlayPath, err)
+	} else {
+		b, _ := os.ReadFile(overlayPath)
+		if !strings.Contains(string(b), "claude-sidecar:") {
+			t.Errorf("compose.sidecar.yml missing claude-sidecar service:\n%s", b)
+		}
+	}
+
+	// hash file must be written to state dir
+	hashPath := filepath.Join(s.cfgDir, "state", filepath.Base(s.projDir)+".sha")
+	if _, err := os.Stat(hashPath); err != nil {
+		t.Errorf("expected hash file %s to exist: %v", hashPath, err)
+	}
+
+	// docker compose -f compose.yml -f compose.sidecar.yml up -d
+	log := s.docker()
+	for _, want := range []string{"compose", "-f", "compose.yml", "compose.sidecar.yml", "up", "-d"} {
+		if !strings.Contains(log, "ARG: "+want) {
+			t.Errorf("expected docker arg %q in invocation log:\n%s", want, log)
+		}
+	}
+}
+
+func TestRun_Up_MergesComposeSidecarLocalWhenPresent(t *testing.T) {
+	s := newSandbox(t)
+	s.writeCfg("config.yaml", `image: img
+host_network: false
+`)
+	s.writeProj("compose.sidecar-local.yml", "services: {}\n")
+
+	_, stderr, code := s.run("up")
+	if code != 0 {
+		t.Fatalf("exit: %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(s.docker(), "ARG: compose.sidecar-local.yml") {
+		t.Errorf("expected compose.sidecar-local.yml in docker args:\n%s", s.docker())
+	}
+}
+
 func TestRun_GenOverlay_IncludesExtraMountsAndTheirShadows(t *testing.T) {
 	s := newSandbox(t)
 	// Create the extra-mount repo alongside the project.
