@@ -44,23 +44,50 @@ func GenerateOverlay(spec OverlaySpec, w io.Writer) error {
 			claudeVolumes = append(claudeVolumes, shadowEntry(mountRoot, p))
 		}
 	}
+	workspaceRoot := "/workspaces/" + spec.Project.Name
+
+	dockerHost := "tcp://claude-sidecar-proxy:2375"
+	if spec.HostNetwork {
+		// In host netns, service-name DNS doesn't resolve. Reach the proxy
+		// through the loopback port published by claude-sidecar-proxy.
+		dockerHost = "tcp://127.0.0.1:12375"
+	}
+
+	claudeService := map[string]any{
+		"image":       spec.Image,
+		"volumes":     claudeVolumes,
+		"working_dir": workspaceRoot,
+		"stdin_open":  true,
+		"tty":         true,
+		"environment": map[string]any{
+			"SIDECAR_CONFIG_DIR": workspaceRoot + "/.sidecar",
+			"DOCKER_HOST":        dockerHost,
+		},
+		"depends_on": []string{"claude-sidecar-proxy"},
+	}
+	if spec.HostNetwork {
+		claudeService["network_mode"] = "host"
+	}
+
+	proxyService := map[string]any{
+		"image": "tecnativa/docker-socket-proxy",
+		"environment": map[string]any{
+			"CONTAINERS": 1,
+			"EXEC":       1,
+			"POST":       1,
+		},
+		"volumes": []string{
+			"/var/run/docker.sock:/var/run/docker.sock:ro",
+		},
+	}
+	if spec.HostNetwork {
+		proxyService["ports"] = []string{"127.0.0.1:12375:2375"}
+	}
+
 	doc := map[string]any{
 		"services": map[string]any{
-			"claude-sidecar": map[string]any{
-				"image":   spec.Image,
-				"volumes": claudeVolumes,
-			},
-			"claude-sidecar-proxy": map[string]any{
-				"image": "tecnativa/docker-socket-proxy",
-				"environment": map[string]any{
-					"CONTAINERS": 1,
-					"EXEC":       1,
-					"POST":       1,
-				},
-				"volumes": []string{
-					"/var/run/docker.sock:/var/run/docker.sock:ro",
-				},
-			},
+			"claude-sidecar":       claudeService,
+			"claude-sidecar-proxy": proxyService,
 		},
 		"volumes": map[string]any{
 			"claude-home": map[string]any{
