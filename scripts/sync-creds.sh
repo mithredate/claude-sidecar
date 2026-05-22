@@ -15,9 +15,19 @@
 set -e
 
 TARGET="${TARGET:-./.credentials.json}"
+SHARED_VOLUME="${SHARED_VOLUME:-claude-sidecar-home}"
 
 log() { echo "[sync-creds] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+
+# Ensure the shared claude-home volume exists. compose.yaml declares it as
+# `external: true`, so it must exist before `docker compose up`. One global
+# volume means: log in once, install plugins once, configure MCP once — works
+# in every project that uses claude-sidecar.
+if ! docker volume inspect "$SHARED_VOLUME" >/dev/null 2>&1; then
+    log "Creating shared volume '$SHARED_VOLUME' (one-time)"
+    docker volume create "$SHARED_VOLUME" >/dev/null
+fi
 
 case "$(uname -s)" in
     Darwin)
@@ -41,3 +51,12 @@ esac
 
 chmod 600 "$TARGET"
 log "Wrote $TARGET ($(wc -c <"$TARGET" | tr -d ' ') bytes)"
+
+# Push into any running claude services so they pick up new creds without a
+# restart. The destination is a regular file in the volume (the bind-mount is
+# at /run/seed/, not at the live path), so docker cp + chown works cleanly.
+for svc in claude claude-host; do
+    docker compose cp "$TARGET" "${svc}:/home/claude/.claude/.credentials.json" >/dev/null 2>&1 \
+        && docker compose exec -T -u root "$svc" chown claude:claude /home/claude/.claude/.credentials.json >/dev/null 2>&1 \
+        && log "pushed into running '$svc' container"
+done

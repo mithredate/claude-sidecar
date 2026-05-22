@@ -136,9 +136,15 @@ services:
       - db-data:/var/lib/postgresql/data
 
 volumes:
-  # Persists /home/claude (settings, session history, .claude.json, MCP state).
-  # Credentials come in via a bind-mount overlay — see services[*].volumes.
+  # SHARED across every project that uses claude-sidecar. Persists /home/claude
+  # (auth, plugins, marketplaces, .claude.json, MCP state, settings, session
+  # history). `external: true` + fixed `name:` means every project resolves to
+  # the same backing volume — log in once, install plugins once, available
+  # everywhere. Create it once with: docker volume create claude-sidecar-home
+  # (or run claude-sidecar's scripts/sync-creds.sh which creates it for you).
   claude-home:
+    name: claude-sidecar-home
+    external: true
   db-data:
 
 # Networks (optional - using default bridge network)

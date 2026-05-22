@@ -14,12 +14,24 @@
 #   docker compose exec -e CLAUDE_YOLO=1 claude claude
 #
 # Prerequisite: create .credentials.json before first `up`. See scripts/sync-creds.sh
+# (sync-creds.sh also creates the shared `claude-sidecar-home` volume if missing.)
 #
 # Do not run both profiles simultaneously: they share the .credentials.json
 # bind-mount and the claude-home volume.
+#
+# The `claude-home` volume is declared external with a fixed name so it is
+# SHARED across every project that uses claude-sidecar. One login, one set of
+# plugins, one MCP/marketplace config, available in every project's container.
+# `docker compose down -v` will NOT delete it (external volumes are
+# Compose-untouchable) — remove it explicitly with
+# `docker volume rm claude-sidecar-home` if you want to start over.
 
 # Shared config for both claude variants
 x-claude-common: &claude-common
+  # Shared image tag so both `claude` and `claude-host` use the same build
+  # output. Without this, compose tags one image per service and a single
+  # `docker compose build` only refreshes one of them.
+  image: claude-sidecar:latest
   build:
     context: .
     dockerfile: Dockerfile
@@ -35,9 +47,12 @@ x-claude-common: &claude-common
     # Whole home dir is persisted so both ~/.claude/ and ~/.claude.json stick
     # across container recreates (onboarding state, MCP config, settings).
     - claude-home:/home/claude
-    # Credentials bind mount is writable so Claude can refresh OAuth tokens,
-    # and sync-creds.sh can refresh it from the host keychain.
-    - ./.credentials.json:/home/claude/.claude/.credentials.json
+    # Credentials are bind-mounted to a SEED location, not the live path.
+    # Single-file bind mounts lock the destination inode against rename(),
+    # which breaks Claude's atomic write when refreshing tokens or completing
+    # MCP OAuth (DCR). The entrypoint promotes seed → volume on first start,
+    # and sync-creds.sh pushes updates into running containers via docker cp.
+    - ./.credentials.json:/run/seed/.credentials.json:ro
     - /dev/null:/workspaces/claude-sidecar/.env
     - /dev/null:/workspaces/claude-sidecar/.credentials.json
   working_dir: /workspaces/claude-sidecar
@@ -119,6 +134,13 @@ services:
     working_dir: /workspaces/claude-sidecar
 
 volumes:
-  # Persists /home/claude (settings, session history, .claude.json, MCP state).
-  # Credentials come in via a bind-mount overlay — see services[*].volumes.
+  # SHARED across every project. Persists /home/claude (auth, plugins,
+  # marketplaces, .claude.json, MCP state, settings, session history).
+  # `external: true` + a fixed `name:` means every compose project that
+  # references this volume resolves to the same backing volume, instead of
+  # the default `<project>_claude-home` per-project naming.
+  # Created on demand by scripts/sync-creds.sh (or `docker volume create
+  # claude-sidecar-home`).
   claude-home:
+    name: claude-sidecar-home
+    external: true
