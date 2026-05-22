@@ -104,6 +104,82 @@ init_wrappers() {
     fi
 }
 
+# Promote credentials from the host bind-mount seed into the volume on first
+# start. The host file is bind-mounted at /run/seed/.credentials.json (read-only
+# seed) instead of directly at the destination because single-file bind mounts
+# lock the inode against rename() — which breaks Claude's atomic write when
+# refreshing tokens or completing MCP OAuth flows (DCR client info gets lost).
+# Once the file lives inside the volume, atomic writes work normally.
+seed_credentials() {
+    SEED="/run/seed/.credentials.json"
+    DEST="/home/claude/.claude/.credentials.json"
+
+    [ -f "$SEED" ] || { log "No seed credentials at $SEED; skipping"; return 0; }
+
+    if [ -f "$DEST" ]; then
+        log "Credentials already present in volume; not re-seeding (run scripts/sync-creds.sh on host to push fresh creds into a running container)"
+        return 0
+    fi
+
+    log "Seeding credentials from $SEED into volume"
+    mkdir -p "$(dirname "$DEST")"
+    cp "$SEED" "$DEST"
+    chown "$CONTAINER_USER:$CONTAINER_USER" "$DEST"
+    chmod 600 "$DEST"
+}
+
+# Verify that every path listed in <workspace>/.sidecar/shadow is actually
+# /dev/null-mounted (file shadows) or tmpfs-mounted (directory shadows, when
+# the shadow entry has a trailing '/'). This is defense-in-depth against
+# someone bringing the container up via `docker compose up` directly,
+# bypassing the host wrapper that generates compose.sidecar.yml. If the
+# wrapper ran, every listed path is shadowed and this is a no-op; if it
+# didn't, sensitive files would be readable and we refuse to drop into Claude.
+shadow_safety_check() {
+    # The workspace is the dir mounted at the same path as the container's
+    # working_dir. We can't know it from entrypoint env, so probe by reading
+    # the actual SIDECAR_CONFIG_DIR env (set by gen-overlay to <workspace>/.sidecar).
+    SIDECAR_DIR="${SIDECAR_CONFIG_DIR:-}"
+    [ -n "$SIDECAR_DIR" ] || return 0
+    SHADOW_FILE="$SIDECAR_DIR/shadow"
+    [ -f "$SHADOW_FILE" ] || return 0  # nothing declared, nothing to verify
+    WORKSPACE="${SIDECAR_DIR%/.sidecar}"
+
+    VIOLATIONS=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        # strip comments + skip empty
+        line="${line%%#*}"
+        case "$line" in *[!\ \	]*) ;; *) continue ;; esac
+        # trim
+        line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        case "$line" in */)
+            # directory shadow: expect a tmpfs mount
+            target="$WORKSPACE/${line%/}"
+            if ! grep -qE "[[:space:]]${target}[[:space:]]+tmpfs[[:space:]]" /proc/self/mounts 2>/dev/null; then
+                VIOLATIONS="$VIOLATIONS  $line (expected tmpfs at $target)
+"
+            fi
+            ;;
+        *)
+            # file shadow: expect a character device (/dev/null bind-mount)
+            target="$WORKSPACE/$line"
+            if [ ! -c "$target" ]; then
+                VIOLATIONS="$VIOLATIONS  $line (expected /dev/null shadow at $target)
+"
+            fi
+            ;;
+        esac
+    done < "$SHADOW_FILE"
+
+    if [ -n "$VIOLATIONS" ]; then
+        log "ERROR: shadow safety check failed — these sensitive paths are NOT shadowed:"
+        printf '%s' "$VIOLATIONS" >&2
+        log "Bring the container up via the host wrapper: 'claude-sidecar up'"
+        return 1
+    fi
+    return 0
+}
+
 # Run a command as the claude user (if we're currently root)
 run_as_user() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -132,6 +208,20 @@ main() {
 
     # Adjust claude user UID/GID if PUID/PGID env vars are set
     adjust_user_ids
+
+    # Promote credentials seed into the volume (no-op if already present)
+    seed_credentials
+
+    # Verify shadow declarations were applied (defense-in-depth against
+    # someone running `docker compose up` directly, bypassing the host
+    # wrapper that generates compose.sidecar.yml). Runs unconditionally at
+    # container start — `docker compose exec` bypasses the entrypoint, so
+    # this is the only place to enforce. Fail-closed: if any declared shadow
+    # is missing, refuse to start. The user sees a clear error from
+    # `docker compose up`.
+    if ! shadow_safety_check; then
+        exit 1
+    fi
 
     # If arguments provided and first arg is "claude", run Claude
     if [ "$1" = "claude" ]; then
