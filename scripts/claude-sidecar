@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# claude-sidecar — host-side wrapper that orchestrates the claude-sidecar
+# container setup for the current project. Reads ~/.claude-sidecar/config.yaml,
+# reads .sidecar/shadow files in the current project and any extra-mount repos,
+# builds an OverlaySpec, and invokes `bridge gen-overlay` inside the
+# claude-sidecar image to produce compose.sidecar.yml.
+#
+# Subcommands:
+#   claude-sidecar              drift-check, then `docker compose exec ... claude`
+#   claude-sidecar up           regenerate overlay and `docker compose up -d`
+#   claude-sidecar refresh      explicit regenerate + recreate
+#   claude-sidecar exec <cmd>   drift-check, then run arbitrary command in claude container
+#   claude-sidecar gen-overlay  print generated overlay to stdout
+set -eu
+
+CFG_DIR="${CLAUDE_SIDECAR_CFG_DIR:-$HOME/.claude-sidecar}"
+CFG_FILE="$CFG_DIR/config.yaml"
+
+die() { printf 'claude-sidecar: %s\n' "$*" >&2; exit 1; }
+
+# Parse a small known YAML schema. Bash-only to avoid a yq dependency. Only
+# extracts top-level `image:`, `host_network:`, and the items of
+# `extra_mounts:` (a list of paths). Values can be unquoted, double-, or
+# single-quoted. Lines starting with '#' are treated as comments.
+parse_config() {
+    [ -f "$CFG_FILE" ] || die "config not found at $CFG_FILE — create it (image: ..., host_network: ..., extra_mounts: [...])"
+
+    IMAGE=""
+    HOST_NETWORK="false"
+    EXTRA_MOUNTS=()
+    local in_list=0 line key val
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # strip comment, then surrounding whitespace
+        line="${line%%#*}"
+        case "$line" in (*[!\ \	]*) ;; (*) continue ;; esac
+
+        if [ "$in_list" -eq 1 ] && [[ "$line" =~ ^[[:space:]]+-[[:space:]]+(.*)$ ]]; then
+            val="${BASH_REMATCH[1]}"
+            val="${val%\"}"; val="${val#\"}"
+            val="${val%\'}"; val="${val#\'}"
+            val="${val/#\~/$HOME}"
+            EXTRA_MOUNTS+=("$val")
+            continue
+        fi
+        # not a list item — closing the list if we were in one
+        in_list=0
+
+        if [[ "$line" =~ ^([A-Za-z_]+):[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]}"
+            val="${val%\"}"; val="${val#\"}"
+            val="${val%\'}"; val="${val#\'}"
+            case "$key" in
+                image)        IMAGE="$val" ;;
+                host_network) HOST_NETWORK="$val" ;;
+                extra_mounts) in_list=1 ;;
+            esac
+        fi
+    done < "$CFG_FILE"
+
+    [ -n "$IMAGE" ] || die "config $CFG_FILE: missing 'image:' field"
+}
+
+# Read a shadow file → newline-separated paths (skip blanks + comments).
+read_shadow_file() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        case "$line" in (*[!\ \	]*) ;; (*) continue ;; esac
+        # trim surrounding whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        printf '%s\n' "$line"
+    done < "$file"
+}
+
+# Print the OverlaySpec YAML to stdout. Reads current project and extra mounts.
+emit_spec() {
+    local proj_root proj_name
+    proj_root="$PWD"
+    proj_name="$(basename "$proj_root")"
+
+    printf 'image: %s\n' "$IMAGE"
+    printf 'host_network: %s\n' "$HOST_NETWORK"
+    printf 'project:\n'
+    printf '  host_path: %s\n' "$proj_root"
+    printf '  name: %s\n' "$proj_name"
+    printf '  shadow_paths:\n'
+    while IFS= read -r p; do
+        [ -n "$p" ] && printf '    - %s\n' "$p"
+    done < <(read_shadow_file "$proj_root/.sidecar/shadow")
+
+    if [ "${#EXTRA_MOUNTS[@]}" -gt 0 ]; then
+        printf 'extra_mounts:\n'
+        local m name
+        for m in "${EXTRA_MOUNTS[@]}"; do
+            name="$(basename "$m")"
+            printf '  - host_path: %s\n' "$m"
+            printf '    name: %s\n' "$name"
+            printf '    shadow_paths:\n'
+            while IFS= read -r p; do
+                [ -n "$p" ] && printf '      - %s\n' "$p"
+            done < <(read_shadow_file "$m/.sidecar/shadow")
+        done
+    fi
+}
+
+# Pipe the spec to `bridge gen-overlay` inside the image.
+run_gen_overlay() {
+    emit_spec | docker run --rm -i "$IMAGE" bridge gen-overlay
+}
+
+# ---- subcommands -----------------------------------------------------------
+
+cmd_gen_overlay() {
+    parse_config
+    run_gen_overlay
+}
+
+# ---- dispatch --------------------------------------------------------------
+
+main() {
+    local sub="${1:-}"
+    case "$sub" in
+        gen-overlay) shift; cmd_gen_overlay "$@" ;;
+        "")          die "no subcommand yet implemented (try: gen-overlay)" ;;
+        *)           die "unknown subcommand: $sub" ;;
+    esac
+}
+
+main "$@"
