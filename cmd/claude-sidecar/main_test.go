@@ -111,6 +111,58 @@ func (s *sandbox) docker() string {
 	return string(b)
 }
 
+func TestRun_GenOverlay_IncludesExtraMountsAndTheirShadows(t *testing.T) {
+	s := newSandbox(t)
+	// Create the extra-mount repo alongside the project.
+	extraDir := filepath.Join(filepath.Dir(s.projDir), "mobile")
+	if err := os.MkdirAll(filepath.Join(extraDir, ".sidecar"), 0o755); err != nil {
+		t.Fatalf("mkdir extra: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(extraDir, ".sidecar", "shadow"),
+		[]byte("firebase.json\nsecrets/\n"), 0o644); err != nil {
+		t.Fatalf("write extra shadow: %v", err)
+	}
+
+	s.writeCfg("config.yaml", `image: img
+host_network: false
+extra_mounts:
+  - `+extraDir+`
+`)
+
+	stdout, stderr, code := s.run("gen-overlay")
+	if code != 0 {
+		t.Fatalf("exit: %d, stderr: %s", code, stderr)
+	}
+
+	if !strings.Contains(stdout, extraDir+":/workspaces/mobile") {
+		t.Errorf("expected extra-mount bind %q in stdout, got:\n%s",
+			extraDir+":/workspaces/mobile", stdout)
+	}
+	if !strings.Contains(stdout, "/dev/null:/workspaces/mobile/firebase.json") {
+		t.Errorf("expected file shadow under extra mount in stdout, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "/workspaces/mobile/secrets") || !strings.Contains(stdout, "tmpfs") {
+		t.Errorf("expected tmpfs dir shadow under extra mount, got:\n%s", stdout)
+	}
+}
+
+func TestRun_GenOverlay_HostNetworkTrueFlowsThrough(t *testing.T) {
+	s := newSandbox(t)
+	s.writeCfg("config.yaml", `image: img
+host_network: true
+`)
+	stdout, stderr, code := s.run("gen-overlay")
+	if code != 0 {
+		t.Fatalf("exit: %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "network_mode: host") {
+		t.Errorf("expected network_mode: host in stdout, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "127.0.0.1:12375") {
+		t.Errorf("expected DOCKER_HOST/proxy port 127.0.0.1:12375 in stdout, got:\n%s", stdout)
+	}
+}
+
 func TestRun_GenOverlay_IncludesCurrentProjectShadowPaths(t *testing.T) {
 	s := newSandbox(t)
 	s.writeCfg("config.yaml", `image: img

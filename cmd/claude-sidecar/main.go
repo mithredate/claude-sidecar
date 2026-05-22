@@ -72,14 +72,15 @@ func cmdGenOverlay(env Env, _ []string) int {
 	return 0
 }
 
-// buildSpec constructs the overlay.Spec for the current project. Extra-mount
-// shadow reading is layered in by subsequent behaviors.
+// buildSpec constructs the overlay.Spec for the current project, including
+// any extra-mount repos declared in the user's config (each contributing its
+// own .sidecar/shadow declarations).
 func buildSpec(cfg config, projRoot string) (overlay.Spec, error) {
 	shadows, err := projectShadowPaths(projRoot)
 	if err != nil {
 		return overlay.Spec{}, err
 	}
-	return overlay.Spec{
+	spec := overlay.Spec{
 		Image:       cfg.Image,
 		HostNetwork: cfg.HostNetwork,
 		Project: overlay.ProjectMount{
@@ -87,7 +88,38 @@ func buildSpec(cfg config, projRoot string) (overlay.Spec, error) {
 			Name:        filepath.Base(projRoot),
 			ShadowPaths: shadows,
 		},
-	}, nil
+	}
+	for _, m := range cfg.ExtraMounts {
+		m = expandHome(m)
+		emShadows, err := projectShadowPaths(m)
+		if err != nil {
+			return overlay.Spec{}, fmt.Errorf("extra-mount %s: %w", m, err)
+		}
+		spec.ExtraMounts = append(spec.ExtraMounts, overlay.ProjectMount{
+			HostPath:    m,
+			Name:        filepath.Base(m),
+			ShadowPaths: emShadows,
+		})
+	}
+	return spec, nil
+}
+
+// expandHome expands a leading "~" in p to the user's home directory.
+func expandHome(p string) string {
+	if len(p) == 0 || p[0] != '~' {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	if len(p) > 1 && p[1] == '/' {
+		return home + p[1:]
+	}
+	return p
 }
 
 func main() {
