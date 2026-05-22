@@ -68,6 +68,45 @@ func tmpfsVolumeTargets(vols []any) []string {
 	return out
 }
 
+func TestRunGenOverlay_ReadsSpecFromStdinAndWritesComposeToStdout(t *testing.T) {
+	input := []byte(`
+image: "test-image"
+project:
+  host_path: /host/foo
+  name: foo
+  shadow_paths:
+    - .env
+`)
+	var stdout, stderr bytes.Buffer
+	code := runGenOverlay(bytes.NewReader(input), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runGenOverlay returned %d, stderr: %s", code, stderr.String())
+	}
+	doc := parseOverlay(t, stdout.Bytes())
+	svc, ok := doc.Services["claude-sidecar"]
+	if !ok {
+		t.Fatalf("expected claude-sidecar service in output, got: %v", keysOf(doc.Services))
+	}
+	if svc.Image != "test-image" {
+		t.Errorf("image: got %q want %q", svc.Image, "test-image")
+	}
+	if !volumeContains(svc.Volumes, "/dev/null:/workspaces/foo/.env") {
+		t.Errorf("expected shadow mount in output, got: %v", svc.Volumes)
+	}
+}
+
+func TestRunGenOverlay_MalformedSpecReturnsNonZeroAndExplains(t *testing.T) {
+	input := []byte("this: is: not: valid: yaml: [[")
+	var stdout, stderr bytes.Buffer
+	code := runGenOverlay(bytes.NewReader(input), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit on malformed input, got 0; stdout: %s", stdout.String())
+	}
+	if stderr.Len() == 0 {
+		t.Errorf("expected stderr message explaining the parse failure")
+	}
+}
+
 func TestGenerateOverlay_EmitsClaudeSidecarServiceWithProjectMount(t *testing.T) {
 	spec := OverlaySpec{
 		Image: "ghcr.io/mithredate/claude-sidecar:latest",

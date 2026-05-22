@@ -42,6 +42,14 @@ func main() {
 		os.Exit(0)
 	}
 
+	// gen-overlay is a self-contained subcommand: it reads its full spec from
+	// stdin and doesn't need .sidecar/bridge.yaml. Handle it before LoadConfig
+	// so callers (the host wrapper, running in an ephemeral container) don't
+	// have to provide a bridge config file.
+	if posArgs := flag.Args(); len(posArgs) > 0 && posArgs[0] == "gen-overlay" {
+		os.Exit(runGenOverlay(os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	// Load config
 	config, err := LoadConfig(configPath)
 	if err != nil {
