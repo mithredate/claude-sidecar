@@ -31,6 +31,10 @@ func GenerateOverlay(spec OverlaySpec, w io.Writer) error {
 	claudeVolumes := []string{
 		fmt.Sprintf("%s:/workspaces/%s", spec.Project.HostPath, spec.Project.Name),
 		"claude-home:/home/claude",
+		fmt.Sprintf("%s/.credentials.json:/run/seed/.credentials.json:ro", spec.Project.HostPath),
+	}
+	for _, p := range spec.Project.ShadowPaths {
+		claudeVolumes = append(claudeVolumes, shadowMount("/workspaces/"+spec.Project.Name, p))
 	}
 	doc := map[string]any{
 		"services": map[string]any{
@@ -61,4 +65,11 @@ func GenerateOverlay(spec OverlaySpec, w io.Writer) error {
 	enc.SetIndent(2)
 	defer enc.Close()
 	return enc.Encode(doc)
+}
+
+// shadowMount returns a Compose volume string that bind-mounts /dev/null over
+// a file under the given container mount path. Directory shadows (trailing
+// '/') are handled in a later behavior.
+func shadowMount(containerMountRoot, relPath string) string {
+	return fmt.Sprintf("/dev/null:%s/%s", containerMountRoot, relPath)
 }

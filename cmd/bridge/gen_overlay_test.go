@@ -102,6 +102,51 @@ func TestGenerateOverlay_EmitsSocketProxyAndSharedHomeVolume(t *testing.T) {
 	}
 }
 
+func TestGenerateOverlay_EmitsCredentialsSeedBindMount(t *testing.T) {
+	spec := OverlaySpec{
+		Image:   "img",
+		Project: ProjectMount{HostPath: "/host/foo", Name: "foo"},
+	}
+	var buf bytes.Buffer
+	if err := GenerateOverlay(spec, &buf); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	doc := parseOverlay(t, buf.Bytes())
+
+	svc := doc.Services["claude-sidecar"]
+	wantMount := "/host/foo/.credentials.json:/run/seed/.credentials.json:ro"
+	if !volumeContains(svc.Volumes, wantMount) {
+		t.Errorf("expected credentials seed bind-mount %q in volumes, got: %v", wantMount, svc.Volumes)
+	}
+}
+
+func TestGenerateOverlay_ShadowsCurrentProjectFiles(t *testing.T) {
+	spec := OverlaySpec{
+		Image: "img",
+		Project: ProjectMount{
+			HostPath:    "/host/foo",
+			Name:        "foo",
+			ShadowPaths: []string{".env", ".credentials.json"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := GenerateOverlay(spec, &buf); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	doc := parseOverlay(t, buf.Bytes())
+
+	svc := doc.Services["claude-sidecar"]
+	wantShadows := []string{
+		"/dev/null:/workspaces/foo/.env",
+		"/dev/null:/workspaces/foo/.credentials.json",
+	}
+	for _, want := range wantShadows {
+		if !volumeContains(svc.Volumes, want) {
+			t.Errorf("expected shadow mount %q in volumes, got: %v", want, svc.Volumes)
+		}
+	}
+}
+
 // keysOf returns the keys of a map for nicer test failure output. Generics
 // require Go 1.18+; the module uses 1.24, so this is safe.
 func keysOf[K comparable, V any](m map[K]V) []K {
