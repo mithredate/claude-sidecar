@@ -49,16 +49,16 @@ setup_sandbox() {
 
     cat > "$SANDBOX/bin/docker" <<'STUB'
 #!/usr/bin/env bash
-# Stub docker: log argv (one per line, prefixed) and stdin (if any) to docker.log.
+# Stub docker: log each argv on its own line (prefixed ARG:) and the stdin
+# block (if any) between STDIN_BEGIN and STDIN_END markers.
 {
-    printf 'ARGV: '
-    for a in "$@"; do printf '%s\0' "$a"; done
-    printf '\n'
+    for a in "$@"; do printf 'ARG: %s\n' "$a"; done
     if [ ! -t 0 ]; then
         printf 'STDIN_BEGIN\n'
         cat
         printf '\nSTDIN_END\n'
     fi
+    printf 'INVOCATION_END\n'
 } >> "$DOCKER_LOG"
 # If the caller is `docker run ...`, emit a representative gen-overlay stdout
 # so wrapper code that captures it has something to read.
@@ -163,6 +163,102 @@ YAML
     assert_contains "$spec" "name: mobile" "spec sets extra-mount name from basename"
     assert_contains "$spec" "firebase.json" "spec includes extra-mount shadow file"
     assert_contains "$spec" "secrets/" "spec includes extra-mount dir shadow"
+
+    teardown_sandbox
+}
+
+test_exec_calls_docker_compose_exec_against_claude_sidecar() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+    # An overlay file must exist for `exec` (no implicit `up`).
+    touch "$SANDBOX/project/compose.sidecar.yml"
+
+    run_wrapper exec "ls" "-la" >/dev/null 2>&1
+    rc=$?
+    assert_eq "$rc" "0" "exit code"
+    log="$(docker_log)"
+    assert_contains "$log" "compose" "docker compose invoked"
+    assert_contains "$log" "exec" "compose exec subcommand"
+    assert_contains "$log" "claude-sidecar" "exec target service name"
+    assert_contains "$log" "ls" "user command passed through"
+
+    teardown_sandbox
+}
+
+test_bare_invocation_runs_claude_in_container() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+    touch "$SANDBOX/project/compose.sidecar.yml"
+
+    run_wrapper >/dev/null 2>&1
+    rc=$?
+    assert_eq "$rc" "0" "exit code for bare invocation"
+    log="$(docker_log)"
+    assert_contains "$log" "exec" "compose exec is invoked"
+    # The bare invocation should run `claude` in the claude-sidecar service:
+    assert_contains "$log" "claude-sidecar" "service name claude-sidecar"
+    # `claude` appears as the command (also as the service name's prefix, but
+    # the standalone arg must be present too — count occurrences indirectly):
+    # The bare invocation must pass 'claude' as the *command* arg to
+    # `docker compose exec claude-sidecar claude`. Look for a standalone arg
+    # line that is exactly 'ARG: claude'.
+    if ! grep -qxF 'ARG: claude' "$SANDBOX/docker.log"; then
+        fail "expected 'claude' arg to be passed; full log:
+$log"
+    fi
+
+    teardown_sandbox
+}
+
+test_exec_warns_on_shadow_drift() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+    mkdir -p "$SANDBOX/project/.sidecar" "$SANDBOX/home/.claude-sidecar/state"
+    echo ".env" > "$SANDBOX/project/.sidecar/shadow"
+    # Stored hash that doesn't match what compute_shadow_hash will produce.
+    printf 'bogus-prior-hash\n' > "$SANDBOX/home/.claude-sidecar/state/project.sha"
+    touch "$SANDBOX/project/compose.sidecar.yml"
+
+    out="$(run_wrapper exec "ls" 2>&1)"
+    rc=$?
+    assert_eq "$rc" "0" "exec still proceeds on drift"
+    assert_contains "$out" "drift" "warning mentions drift"
+
+    teardown_sandbox
+}
+
+test_exec_silent_when_no_drift() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+    mkdir -p "$SANDBOX/project/.sidecar" "$SANDBOX/home/.claude-sidecar/state"
+    echo ".env" > "$SANDBOX/project/.sidecar/shadow"
+    touch "$SANDBOX/project/compose.sidecar.yml"
+
+    # Compute the expected hash using the SAME bash function the wrapper uses,
+    # then store it as the prior hash so drift detection sees a match.
+    expected="$(
+        (cd "$SANDBOX/project" && {
+            cat ".sidecar/shadow" 2>/dev/null
+        } | shasum -a 256 | awk '{print $1}')
+    )"
+    echo "$expected" > "$SANDBOX/home/.claude-sidecar/state/project.sha"
+
+    err="$(run_wrapper exec "ls" 2>&1 >/dev/null)"
+    case "$err" in
+        *drift*) fail "should be silent when no drift; got stderr: $err" ;;
+    esac
 
     teardown_sandbox
 }
