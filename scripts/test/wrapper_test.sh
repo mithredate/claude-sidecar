@@ -167,6 +167,62 @@ YAML
     teardown_sandbox
 }
 
+test_up_writes_overlay_file_and_calls_compose_up() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+
+    run_wrapper up >/dev/null 2>&1
+    rc=$?
+    assert_eq "$rc" "0" "exit code"
+
+    if [ ! -f "$SANDBOX/project/compose.sidecar.yml" ]; then
+        fail "expected $SANDBOX/project/compose.sidecar.yml to exist"
+    fi
+    log="$(docker_log)"
+    assert_contains "$log" "compose" "docker invoked with compose"
+    assert_contains "$log" "compose.sidecar.yml" "compose given the overlay file via -f"
+    assert_contains "$log" "up" "compose subcommand is up"
+
+    teardown_sandbox
+}
+
+test_up_records_drift_hash() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+    mkdir -p "$SANDBOX/project/.sidecar"
+    echo ".env" > "$SANDBOX/project/.sidecar/shadow"
+
+    run_wrapper up >/dev/null 2>&1
+
+    hash_file="$SANDBOX/home/.claude-sidecar/state/project.sha"
+    if [ ! -f "$hash_file" ]; then
+        fail "expected hash file at $hash_file"
+    fi
+
+    teardown_sandbox
+}
+
+test_up_merges_compose_sidecar_local_when_present() {
+    setup_sandbox
+    cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'
+image: img
+host_network: false
+YAML
+    touch "$SANDBOX/project/compose.sidecar-local.yml"
+
+    run_wrapper up >/dev/null 2>&1
+    log="$(docker_log)"
+    assert_contains "$log" "compose.sidecar-local.yml" "compose given the local override via -f"
+
+    teardown_sandbox
+}
+
 test_spec_propagates_host_network_true() {
     setup_sandbox
     cat > "$SANDBOX/home/.claude-sidecar/config.yaml" <<'YAML'

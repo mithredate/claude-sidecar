@@ -15,6 +15,7 @@ set -eu
 
 CFG_DIR="${CLAUDE_SIDECAR_CFG_DIR:-$HOME/.claude-sidecar}"
 CFG_FILE="$CFG_DIR/config.yaml"
+STATE_DIR="$CFG_DIR/state"
 
 die() { printf 'claude-sidecar: %s\n' "$*" >&2; exit 1; }
 
@@ -112,11 +113,45 @@ run_gen_overlay() {
     emit_spec | docker run --rm -i "$IMAGE" bridge gen-overlay
 }
 
+# Hash all relevant shadow-file contents and the config's extra_mounts list.
+# Used by `up` (to record current state) and (later) by `exec` (to detect drift).
+compute_shadow_hash() {
+    local m
+    {
+        cat "$PWD/.sidecar/shadow" 2>/dev/null || true
+        for m in "${EXTRA_MOUNTS[@]:-}"; do
+            printf '%s\n' "EXTRA:$m"
+            cat "$m/.sidecar/shadow" 2>/dev/null || true
+        done
+    } | shasum -a 256 | awk '{print $1}'
+}
+
+# Compose -f arg list for the current project: the user's compose.yml, the
+# generated compose.sidecar.yml, plus the optional compose.sidecar-local.yml.
+compose_args() {
+    local -a args=()
+    [ -f "$PWD/compose.yml" ]   && args+=(-f compose.yml)
+    [ -f "$PWD/compose.yaml" ]  && args+=(-f compose.yaml)
+    args+=(-f compose.sidecar.yml)
+    [ -f "$PWD/compose.sidecar-local.yml" ] && args+=(-f compose.sidecar-local.yml)
+    printf '%s\n' "${args[@]}"
+}
+
 # ---- subcommands -----------------------------------------------------------
 
 cmd_gen_overlay() {
     parse_config
     run_gen_overlay
+}
+
+cmd_up() {
+    parse_config
+    run_gen_overlay > "$PWD/compose.sidecar.yml"
+    mkdir -p "$STATE_DIR"
+    compute_shadow_hash > "$STATE_DIR/$(basename "$PWD").sha"
+    local cargs=()
+    while IFS= read -r a; do cargs+=("$a"); done < <(compose_args)
+    docker compose "${cargs[@]}" up -d "$@"
 }
 
 # ---- dispatch --------------------------------------------------------------
@@ -125,7 +160,8 @@ main() {
     local sub="${1:-}"
     case "$sub" in
         gen-overlay) shift; cmd_gen_overlay "$@" ;;
-        "")          die "no subcommand yet implemented (try: gen-overlay)" ;;
+        up)          shift; cmd_up "$@" ;;
+        "")          die "no subcommand yet implemented (try: gen-overlay, up)" ;;
         *)           die "unknown subcommand: $sub" ;;
     esac
 }
