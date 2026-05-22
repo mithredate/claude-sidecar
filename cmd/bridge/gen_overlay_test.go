@@ -138,6 +138,45 @@ func TestGenerateOverlay_EmitsCredentialsSeedBindMount(t *testing.T) {
 	}
 }
 
+func TestGenerateOverlay_BindMountsExtraReposAndAppliesTheirShadows(t *testing.T) {
+	spec := OverlaySpec{
+		Image:   "img",
+		Project: ProjectMount{HostPath: "/host/foo", Name: "foo"},
+		ExtraMounts: []ProjectMount{
+			{
+				HostPath:    "/host/mobile",
+				Name:        "mobile",
+				ShadowPaths: []string{"firebase.json", "secrets/"},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	if err := GenerateOverlay(spec, &buf); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	doc := parseOverlay(t, buf.Bytes())
+	vols := doc.Services["claude-sidecar"].Volumes
+
+	if !volumeContains(vols, "/host/mobile:/workspaces/mobile") {
+		t.Errorf("expected extra-mount bind for mobile, got: %v", vols)
+	}
+	if !volumeContains(vols, "/dev/null:/workspaces/mobile/firebase.json") {
+		t.Errorf("expected file shadow inside extra mount, got: %v", vols)
+	}
+	gotTmpfs := tmpfsVolumeTargets(vols)
+	want := "/workspaces/mobile/secrets"
+	found := false
+	for _, g := range gotTmpfs {
+		if g == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected tmpfs target %q for extra-mount dir shadow, got: %v", want, gotTmpfs)
+	}
+}
+
 func TestGenerateOverlay_ShadowsCurrentProjectDirsViaTmpfs(t *testing.T) {
 	spec := OverlaySpec{
 		Image: "img",

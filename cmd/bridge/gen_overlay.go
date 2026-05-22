@@ -37,6 +37,13 @@ func GenerateOverlay(spec OverlaySpec, w io.Writer) error {
 	for _, p := range spec.Project.ShadowPaths {
 		claudeVolumes = append(claudeVolumes, shadowEntry("/workspaces/"+spec.Project.Name, p))
 	}
+	for _, em := range spec.ExtraMounts {
+		mountRoot := "/workspaces/" + em.Name
+		claudeVolumes = append(claudeVolumes, fmt.Sprintf("%s:%s", em.HostPath, mountRoot))
+		for _, p := range em.ShadowPaths {
+			claudeVolumes = append(claudeVolumes, shadowEntry(mountRoot, p))
+		}
+	}
 	doc := map[string]any{
 		"services": map[string]any{
 			"claude-sidecar": map[string]any{
