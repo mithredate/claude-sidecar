@@ -1,163 +1,62 @@
-# Docker Compose V2 Example: Claude Code Sidecar Integration
-# =========================================================
-# Modern compose.yml format (no version field required).
-# Use with Docker Compose V2: docker compose up -d
+# Claude Sidecar - single-container integration example
+# ======================================================
+# Drop this into a project (adjust paths) and run: docker compose up -d
 #
-# Key security features:
-# - Docker socket is NOT directly exposed to Claude container
-# - Socket proxy limits API access to only required operations
-# - Claude runs as non-root user
-#
-# Usage:
-# 1. Copy this file to your project as compose.yml
-# 2. Adjust the volumes/services to match your project structure
-# 3. Create .sidecar/bridge.yaml with your command mappings
-# 4. Run: docker compose up -d
+# Model:
+# - Claude Code runs in one container with toolchains (mise) installed in-image.
+# - The project tree is mounted at its REAL host path so Claude's per-project MCP
+#   config + history (keyed by absolute path) match inside the container.
+# - Claude reaches your app services (db, redis, ...) over this compose network by
+#   service name - no Docker socket, no command bridge.
+# - A startup firewall whitelists egress; Claude runs as a non-root user.
 
 services:
-  # ===========================================
-  # Docker Socket Proxy (Security Layer)
-  # ===========================================
-  # Tecnativa's docker-socket-proxy provides a filtered proxy to the Docker socket.
-  # This prevents Claude from accessing dangerous Docker operations.
-  # See: https://github.com/Tecnativa/docker-socket-proxy
-  socket-proxy:
-    image: tecnativa/docker-socket-proxy:latest
-    restart: unless-stopped
-    environment:
-      # Allow container listing (required for bridge script)
-      CONTAINERS: 1
-      # Allow exec operations (required for running commands in containers)
-      EXEC: 1
-      # Allow POST requests (required for exec create/start)
-      POST: 1
-      # Deny all other operations (these are denied by default, listed for clarity)
-      ALLOW_START: 0
-      ALLOW_STOP: 0
-      ALLOW_RESTARTS: 0
-      BUILD: 0
-      COMMIT: 0
-      CONFIGS: 0
-      DISTRIBUTION: 0
-      EVENTS: 0
-      IMAGES: 0
-      INFO: 0
-      NETWORKS: 0
-      NODES: 0
-      PLUGINS: 0
-      SECRETS: 0
-      SERVICES: 0
-      SESSION: 0
-      SWARM: 0
-      SYSTEM: 0
-      TASKS: 0
-      VOLUMES: 0
-    volumes:
-      # Mount Docker socket (read-only for additional security)
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    # Socket proxy should not be exposed to host network
-    # It's only accessible from within the Docker network
-
-  # ===========================================
-  # Claude Code Sidecar
-  # ===========================================
-  # The Claude Code container that uses the socket proxy
-  # to execute commands in your project's containers.
   claude:
     image: ghcr.io/mithredate/claude-sidecar:latest
-    # Build from local Dockerfile if image not available:
+    # Or build locally:
     # build: ./path/to/claude-sidecar
-    # Build with custom working directory:
-    # build:
-    #   context: ./path/to/claude-sidecar
-    #   args:
-    #     CLAUDE_WORKDIR: /app
-    depends_on:
-      - socket-proxy
-    environment:
-      # Connect to Docker via the socket proxy
-      DOCKER_HOST: tcp://socket-proxy:2375
-      # Optional: Your Anthropic API key
-      # If not provided, you'll be prompted to authenticate when running Claude for the first time
-      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      # Base directory for claude-sidecar config files (bridge.yaml, allowed-domains.txt)
-      # Default: $PWD/.sidecar (where PWD is the container's working_dir)
-      # Override this if your config folder is in a different location than working_dir/.sidecar
-      # SIDECAR_CONFIG_DIR: /workspaces/sample-project/.sidecar
-    volumes:
-      # Mount your project - the path here should match working_dir below
-      - .:/workspaces/sample-project
-      # Named volume for Claude session persistence (per-project)
-      # Credentials persist across container restarts without UID mismatch issues
-      - claude-config:/home/claude/.claude
-      # Optional: Mount credentials extracted from host for MCP SSO support
-      # macOS: security find-generic-password -s "Claude Code-credentials" -w > .credentials.json
-      # Linux: cp ~/.claude/.credentials.json .credentials.json
-      # - ./.credentials.json:/home/claude/.claude/.credentials.json:ro
-    # Set the working directory to match your volume mount point
-    # Different projects may use /app, /workspace, /workspaces/my-project, etc.
-    working_dir: /workspaces/sample-project
+    container_name: claude
     stdin_open: true
     tty: true
-    # Usage:
-    #   docker compose exec claude claude                   # Run interactively
-    #   docker compose exec -e CLAUDE_YOLO=1 claude claude  # Run in YOLO mode
-
-  # ===========================================
-  # Claude Code Viewer (Optional)
-  # ===========================================
-  # Web UI for monitoring Claude sessions in real-time
-  # Access at http://localhost:3000 (or VIEWER_PORT if customized)
-  viewer:
-    image: node:20-alpine
-    command: ["npx", "@kimuson/claude-code-viewer@latest", "--hostname", "0.0.0.0"]
+    # Required for the egress firewall (iptables/ipset)
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     environment:
-      PORT: ${VIEWER_PORT:-3000}
-      # Point viewer to the mounted claude data directory (read-only)
-      CCV_GLOBAL_CLAUDE_DIR: /claude-data
-    ports:
-      - "${VIEWER_PORT:-3000}:${VIEWER_PORT:-3000}"
+      - SIDECAR_CONFIG_DIR=${HOME}/projects/myapp/.sidecar
+      - MISE_TRUSTED_CONFIG_PATHS=${HOME}/projects
+      # On Linux, match the host user so mounted files are owned correctly:
+      # - PUID=1000
+      # - PGID=1000
+      # Give Claude the connection info its app code needs (deferred credential
+      # isolation: the brain holds these for now):
+      # - DATABASE_URL=postgres://myapp:secret@db:5432/myapp
     volumes:
-      # Mount claude-config volume read-only at custom path to avoid permission conflicts
-      - claude-config:/claude-data:ro
-    restart: unless-stopped
+      # Mount the projects tree at the REAL host path (source == target).
+      - ${HOME}/projects:${HOME}/projects
+      # Persistent Claude home: auth, config, and installed toolchains survive recreation.
+      - claude-home:/home/claude
+      # Read-only seeds (copied into the volume on first start only). See README.
+      - ./.credentials.json:/seed/credentials.json:ro
+      - ${HOME}/.claude.json:/seed/claude.json:ro
+      # Mask this project's secret files from the model.
+      - /dev/null:${HOME}/projects/myapp/.env
+      - /dev/null:${HOME}/projects/myapp/.credentials.json
+    working_dir: ${HOME}/projects/myapp
 
   # ===========================================
-  # Example Application Containers
+  # Your application services go here. Claude reaches them by name over this
+  # network (e.g. db:5432). Example:
   # ===========================================
-  # Replace these with your actual project services.
-  # These are example containers that Claude can exec into.
-
-  # Example: PHP/Laravel application
-  app:
-    image: php:8.2-fpm-alpine
-    volumes:
-      - .:/var/www/html
-    working_dir: /var/www/html
-
-  # Example: Node.js frontend
-  node:
-    image: node:20-alpine
-    volumes:
-      - .:/app
-    working_dir: /app
-    command: ["tail", "-f", "/dev/null"]  # Keep container running
-
-  # Example: Database
-  db:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: myapp
-      POSTGRES_USER: myapp
-      POSTGRES_PASSWORD: secret
-    volumes:
-      - db-data:/var/lib/postgresql/data
+  # db:
+  #   image: postgres:15-alpine
+  #   environment:
+  #     POSTGRES_DB: myapp
+  #     POSTGRES_USER: myapp
+  #     POSTGRES_PASSWORD: secret
+  #   volumes:
+  #     - db-data:/var/lib/postgresql/data
 
 volumes:
-  # Per-project Claude config volume (stores credentials, settings, session logs)
-  claude-config:
-  db-data:
-
-# Networks (optional - using default bridge network)
-# If your project uses custom networks, ensure socket-proxy
-# and claude services are on the same network as your app containers.
+  claude-home:
+  # db-data:

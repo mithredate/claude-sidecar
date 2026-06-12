@@ -1,16 +1,21 @@
 #!/bin/sh
-# Wrapper for claude that handles CLAUDE_YOLO and ensures non-root execution
-CLAUDE_BIN="/usr/local/bin/claude"
-CONTAINER_USER="claude"
+# claude wrapper
+# ==============
+# The container starts as root (for firewall init), so `docker compose exec claude
+# claude` would otherwise run Claude as root and miss the seeded auth in
+# /home/claude/.claude. This wrapper drops to the non-root 'claude' user and injects
+# the CLAUDE_YOLO flag. Placed ahead of /usr/local/bin on PATH.
+REAL_CLAUDE=/usr/local/bin/claude
 
-# Add --dangerously-skip-permissions if CLAUDE_YOLO is set
+# Add --dangerously-skip-permissions when CLAUDE_YOLO=1
 if [ "$CLAUDE_YOLO" = "1" ]; then
     set -- --dangerously-skip-permissions "$@"
 fi
 
-# Drop to claude user if running as root
 if [ "$(id -u)" -eq 0 ]; then
-    exec su -s /bin/sh "$CONTAINER_USER" -c "\"$CLAUDE_BIN\" $*"
+    # runuser sets HOME/USER from the target's passwd entry and passes args
+    # through without a shell re-split (avoids quoting/injection issues).
+    exec runuser -u claude -- "$REAL_CLAUDE" "$@"
 else
-    exec "$CLAUDE_BIN" "$@"
+    exec "$REAL_CLAUDE" "$@"
 fi

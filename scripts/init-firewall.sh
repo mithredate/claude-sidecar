@@ -83,7 +83,7 @@ setup_ipset() {
     ipset add "$IPSET_NAME" 127.0.0.11
 
     # Add Docker internal network ranges (for container-to-container communication)
-    # This allows reaching other compose services like socket-proxy, golang sidecar, etc.
+    # This allows reaching other compose services (db, redis, etc.) by name.
     log "Adding Docker internal network ranges..."
     # Get the container's network from routing table and allow entire subnet
     local docker_network

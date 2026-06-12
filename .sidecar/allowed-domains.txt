@@ -1,0 +1,28 @@
+# Allowed egress domains for the Claude container firewall.
+# This file REPLACES the built-in defaults (GitHub IP ranges are still added
+# dynamically by init-firewall.sh regardless of this file).
+#
+# NOTE: domains are resolved to IPs once at container start. CDN-backed hosts
+# rotate IPs, so a long-lived container may eventually fail to reach them until
+# restart. See README for the re-resolution / egress-proxy follow-up.
+
+# --- Anthropic / Claude Code ---
+api.anthropic.com
+console.anthropic.com
+statsig.anthropic.com
+statsig.com
+sentry.io
+
+# --- Package registry ---
+registry.npmjs.org
+
+# --- mise + prebuilt toolchain downloads ---
+mise.run
+mise.jdx.dev
+objects.githubusercontent.com
+codeload.github.com
+release-assets.githubusercontent.com
+nodejs.org
+go.dev
+dl.google.com
+storage.googleapis.com

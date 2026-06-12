@@ -2,7 +2,7 @@
 
 [![Build and Publish Docker Image](https://github.com/mithredate/claude-sidecar/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/mithredate/claude-sidecar/actions/workflows/docker-publish.yml)
 
-A Docker image with Claude Code that delegates command execution to sidecar containers via a secure Docker socket proxy.
+A Docker image that runs headless Claude Code in a single container with project toolchains installed in-image (via mise) and an egress firewall.
 
 ## Quick Start
 
@@ -28,38 +28,36 @@ docker compose down                      # Stop container
 
 ## How It Works
 
-Claude runs in its own container. A bridge routes commands (`php`, `npm`, `go`, etc.) to your project's sidecar containers via dispatcher symlinks and Docker socket proxy. Symlinks are generated at container startup from `bridge.yaml` configuration.
+Claude Code runs in a single container with the project mounted at its **real host
+path**. Toolchains (`node`, `go`, `python`, …) are installed on demand by
+[mise](https://mise.jdx.dev) from each project's `.tool-versions` / `mise.toml`, so
+Claude runs build/test commands directly. It reaches your app's services
+(db, redis, …) over the compose network by service name — there is no Docker socket
+access or command bridge. A startup firewall restricts egress and Claude runs as a
+non-root user.
 
 ## Configuration
 
-### Bridge (`bridge.yaml`)
+### Toolchains (mise)
 
-Create `.sidecar/bridge.yaml` to map commands to containers. See [`examples/claude-bridge.yaml`](examples/claude-bridge.yaml) for the full schema with path mapping.
-
-Minimal example:
-
-```yaml
-version: "1"
-default_container: app
-
-containers:
-  app: myproject-app-1
-  php: myproject-php-1
-
-commands:
-  php:
-    container: php
-    exec: php
-    workdir: /var/www/html
-```
+Toolchains resolve per-project from `.tool-versions` or `mise.toml` and install on
+first use (prebuilt — fast, no compiler). Installed versions persist in the
+`claude-home` volume. Set `MISE_TRUSTED_CONFIG_PATHS` (the example points it at your
+projects root) so project configs are trusted without a manual `mise trust`.
 
 ### Network Firewall
 
-The container includes an optional firewall that whitelists allowed domains using `iptables` + `ipset`. Requires `NET_ADMIN` and `NET_RAW` capabilities.
+A startup firewall whitelists allowed domains using `iptables` + `ipset`. Requires
+`NET_ADMIN` and `NET_RAW` capabilities.
 
-**Default allowed**: GitHub (dynamic IPs), npm, Anthropic APIs.
+**Allowed by default**: GitHub (dynamic IP ranges) plus the domains in
+[`.sidecar/allowed-domains.txt`](.sidecar/allowed-domains.txt) (Anthropic APIs, npm,
+and the mise/toolchain download hosts). Add the domains of any MCP servers or
+package registries your projects need.
 
-**Customize**: Copy [`.sidecar/allowed-domains.txt.example`](.sidecar/allowed-domains.txt.example) to `.sidecar/allowed-domains.txt` and add your domains.
+> **Limitation:** domains are resolved to IPs once at startup. CDN-backed hosts
+> rotate IPs, so a long-lived container may eventually fail to reach them until
+> restarted. A periodic re-resolution or egress proxy is a planned follow-up.
 
 **Disable**: Remove the `cap_add` section from your compose file.
 
@@ -79,25 +77,45 @@ docker compose build --build-arg CLAUDE_UID=501 --build-arg CLAUDE_GID=501
 
 ## Authentication
 
-Credentials persist in a Docker volume (`<project>_claude-config`). On first run, Claude prompts for authentication.
+Auth and config live in a persistent Docker volume (`<project>_claude-home`). On
+first start, the entrypoint **seeds** that volume from two read-only mounts and
+never overwrites them again, so:
 
-**MCP SSO**: Some MCP servers need host credentials. Extract and mount them:
+- there is no re-authentication or re-onboarding across container recreation, and
+- OAuth tokens refreshed inside the container persist in the volume (the seed file
+  stays read-only and untouched).
 
-```bash
-# macOS
-security find-generic-password -s "Claude Code-credentials" -w > .credentials.json
+Provide the two seeds before `docker compose up`:
 
-# Linux
-cp ~/.claude/.credentials.json .credentials.json
-```
+1. **`.credentials.json`** — the credential blob. It must contain the **full**
+   keychain entry (both `claudeAiOauth` *and* `mcpOAuth`), or MCP servers will be
+   unauthenticated in the container.
 
-Then mount in compose (see [`examples/compose.yml`](examples/compose.yml) for volume configuration including shadowing sensitive files from workspace).
+   ```bash
+   # macOS — capture the WHOLE blob (do not hand-extract a single key)
+   security find-generic-password -s "Claude Code-credentials" -w > .credentials.json
 
-**Re-authenticate**: `docker volume rm <project>_claude-config`
+   # Linux — the file already contains the full blob
+   cp ~/.claude/.credentials.json .credentials.json
+   ```
 
-## Viewer (Optional)
+   Verify it has both keys:
+   ```bash
+   python3 -c "import json;print(list(json.load(open('.credentials.json')).keys()))"
+   # -> ['claudeAiOauth', 'mcpOAuth']
+   ```
 
-Web UI for monitoring Claude sessions. Configuration included in [`examples/compose.yml`](examples/compose.yml). Access at http://localhost:3000.
+2. **`~/.claude.json`** — global config (`hasCompletedOnboarding`, `oauthAccount`,
+   per-project `mcpServers`). Mounted from your home dir by `compose.yaml`; no copy
+   needed.
+
+> **Linux note:** macOS Docker Desktop virtualizes file ownership, so seeds are
+> readable regardless of UID. On native Linux, the container's `claude` user must
+> match the host file owner — run with `-e PUID=$(id -u) -e PGID=$(id -g)` (or
+> build with matching `CLAUDE_UID`/`CLAUDE_GID`), or seeding hits permission errors.
+
+**Re-authenticate / reset:** `docker compose down -v` (removes the `claude-home`
+volume so the next start re-seeds from the files above).
 
 ## Environment Variables
 
@@ -109,9 +127,13 @@ Web UI for monitoring Claude sessions. Configuration included in [`examples/comp
 
 ## Security
 
-- Socket proxy limits Docker API to container list/exec only
-- Network firewall restricts outbound to allowed domains
-- Runs as non-root user with configurable UID/GID
+- Network firewall restricts outbound traffic to allowed domains
+- Runs as a non-root user with configurable UID/GID
+- This repo's secret files (`.env`, `.credentials.json`) are masked from the model
+
+> **Not yet isolated:** credentials the app code needs (DB URLs, API keys) are
+> currently visible to the model in the container. Scoping those to sandbox-only
+> resources is deferred future work — see CLAUDE.md.
 
 ## Building
 

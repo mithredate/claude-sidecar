@@ -1,50 +1,18 @@
 # Docker Compose v2 configuration for claude-sidecar
 # =====================================================
-# This compose file sets up:
-#   1. claude: The main Claude Code container (built from local Dockerfile)
-#   2. golang: A Go sidecar container for running go commands via bridge
-#   3. socket-proxy: Docker socket proxy for secure, limited Docker access
-#   4. viewer: Claude Code Viewer web UI for monitoring sessions
+# Single-container model:
+#   claude: Claude Code + project toolchains (mise). Runs build/test directly
+#   and reaches project services (db, redis, ...) over the compose network.
+#
+# There is no command bridge or Docker socket proxy: Claude no longer execs into
+# sibling containers, so it does not need Docker access at all.
 #
 # Usage:
-#   docker compose up -d                              # Start all services
-#   docker compose exec claude claude                 # Run Claude interactively
+#   docker compose up -d                                # Start
+#   docker compose exec claude claude                   # Run Claude interactively
 #   docker compose exec -e CLAUDE_YOLO=1 claude claude  # Run Claude in YOLO mode
-#
-# For development on this project, this allows Claude to run go commands
-# (go build, go test, go vet, etc.) in the golang sidecar container.
 
 services:
-  # Docker socket proxy - limits Docker API access to exec operations only
-  socket-proxy:
-    image: tecnativa/docker-socket-proxy
-    container_name: claude-sidecar-socket-proxy
-    environment:
-      # Only allow container inspection and exec operations
-      - CONTAINERS=1
-      - EXEC=1
-      - POST=1
-      # Disable all other Docker API endpoints
-      - IMAGES=1
-      - NETWORKS=1
-      - VOLUMES=1
-      - SERVICES=0
-      - TASKS=0
-      - NODES=0
-      - BUILD=1
-      - COMMIT=0
-      - CONFIGS=0
-      - DISTRIBUTION=0
-      - PLUGINS=0
-      - SECRETS=0
-      - SESSION=0
-      - SWARM=0
-      - SYSTEM=0
-    volumes:
-      # Mount Docker socket read-only to socket-proxy only
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    restart: unless-stopped
-
   # Main Claude Code container
   claude:
     build:
@@ -65,55 +33,37 @@ services:
       - NET_ADMIN
       - NET_RAW
     environment:
-      # Base directory for claude-sidecar config files (bridge.yaml, allowed-domains.txt)
-      # This is used by both the bridge and firewall scripts
-      - SIDECAR_CONFIG_DIR=/workspaces/claude-sidecar/.sidecar
-      # Docker host via socket proxy for secure, limited Docker access
-      - DOCKER_HOST=tcp://socket-proxy:2375
+      # Base directory for claude-sidecar config files (allowed-domains.txt)
+      # Used by the firewall script
+      - SIDECAR_CONFIG_DIR=${HOME}/projects/claude-sidecar/.sidecar
+      # Auto-trust mise configs (mise.toml/.tool-versions) anywhere under the
+      # projects tree, so per-project toolchain pins work without manual `mise trust`.
+      - MISE_TRUSTED_CONFIG_PATHS=${HOME}/projects
     volumes:
-      # Mount current project directory as workspace
-      - .:/workspaces/claude-sidecar
-      # Named volumes for persistence - ORDER MATTERS: parent must come before child
-      - claude-home:/home/claude/
-      - claude-config:/home/claude/.claude
-      # Mount credentials file extracted from host (macOS keychain or Linux ~/.claude/.credentials.json)
-      # See README for extraction instructions
-      - ./.credentials.json:/home/claude/.claude/.credentials.json:ro
-      - /dev/null:/workspaces/claude-sidecar/.env
-      - /dev/null:/workspaces/claude-sidecar/.credentials.json
-    depends_on:
-      - socket-proxy
-      - golang
-    working_dir: /workspaces/claude-sidecar
-
-  # Go sidecar container for running go commands
-  golang:
-    image: golang:1.24-alpine
-    container_name: claude-sidecar-golang
-    command: ["sleep", "infinity"]
-    volumes:
-      # Mount current project directory (same as claude container)
-      - .:/workspaces/claude-sidecar
-    working_dir: /workspaces/claude-sidecar
-
-  # Claude Code Viewer - web UI for monitoring Claude sessions
-  viewer:
-    image: node:20-alpine
-    container_name: claude-sidecar-viewer
-    command: ["npx", "@kimuson/claude-code-viewer@latest", "--hostname", "0.0.0.0"]
-    environment:
-      - PORT=${VIEWER_PORT:-3000}
-      # Point viewer to the mounted claude data directory (read-only)
-      - CCV_GLOBAL_CLAUDE_DIR=/claude-data
-    ports:
-      - "${VIEWER_PORT:-3000}:${VIEWER_PORT:-3000}"
-    volumes:
-      # Mount claude-config volume read-only at custom path to avoid permission conflicts
-      - claude-config:/claude-data:ro
-    restart: unless-stopped
+      # Mount the whole projects tree at its REAL host path. Mounting at the identical
+      # absolute path means Claude's per-project MCP config and session history
+      # (keyed by absolute path in ~/.claude.json) match inside the container.
+      # ${HOME} interpolates on the host, so source==target and it stays portable.
+      # NOTE: this exposes every sibling repo (and their .env files) to the model.
+      - ${HOME}/projects:${HOME}/projects
+      # Persistent per-container Claude home. Auth + config survive container
+      # recreation (no re-auth / re-onboarding), and are NOT shared live with the
+      # host (no concurrent-write/daemon-lock hazard, no shared session history).
+      - claude-home:/home/claude
+      # Read-only SEED mounts. The entrypoint copies these into the volume on first
+      # start only. Read-only file binds, so the atomic-save/inode gotcha is moot and
+      # there is no host-bind-inside-host-bind nesting (which fails on macOS virtiofs).
+      #   credentials.json: FULL keychain blob (claudeAiOauth + mcpOAuth) so MCP auth works
+      #   claude.json:      global config (hasCompletedOnboarding, oauthAccount, mcpServers)
+      - ./.credentials.json:/seed/credentials.json:ro
+      - ${HOME}/.claude.json:/seed/claude.json:ro
+      # Mask THIS repo's secret files - critically .credentials.json holds the full
+      # keychain blob (all MCP tokens) and now lives inside the mounted projects tree.
+      - /dev/null:${HOME}/projects/claude-sidecar/.env
+      - /dev/null:${HOME}/projects/claude-sidecar/.credentials.json
+    working_dir: ${HOME}/projects/claude-sidecar
 
 # Named volumes for persistent storage
 volumes:
-  # Per-project Claude config volume (stores credentials, settings, etc.)
-  claude-config:
+  # Per-container Claude home: auth + config persist across recreation
   claude-home:

@@ -53,6 +53,32 @@ adjust_user_ids() {
     fi
 }
 
+# Seed Claude auth + config into the persistent home volume on first start.
+# Copies the read-only seed mounts (/seed/*) into ~/.claude only if absent, so a
+# token refreshed inside the container is never clobbered on restart. Idempotent.
+SEED_DIR="/seed"
+CLAUDE_HOME="/home/claude"
+seed_claude_config() {
+    mkdir -p "$CLAUDE_HOME/.claude"
+
+    # Full credential blob (claudeAiOauth + mcpOAuth). Copy only if missing so
+    # in-place OAuth refreshes living in the volume survive container restarts.
+    if [ ! -f "$CLAUDE_HOME/.claude/.credentials.json" ] && [ -f "$SEED_DIR/credentials.json" ]; then
+        log "Seeding credentials into $CLAUDE_HOME/.claude/.credentials.json"
+        cp "$SEED_DIR/credentials.json" "$CLAUDE_HOME/.claude/.credentials.json"
+    fi
+
+    # Global config (hasCompletedOnboarding, oauthAccount, mcpServers). Copy only if missing.
+    if [ ! -f "$CLAUDE_HOME/.claude.json" ] && [ -f "$SEED_DIR/claude.json" ]; then
+        log "Seeding global config into $CLAUDE_HOME/.claude.json"
+        cp "$SEED_DIR/claude.json" "$CLAUDE_HOME/.claude.json"
+    fi
+
+    # Ensure the claude user owns its home and the credential file is private.
+    chown -R "$CONTAINER_USER:$CONTAINER_USER" "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.claude.json" 2>/dev/null || true
+    chmod 600 "$CLAUDE_HOME/.claude/.credentials.json" 2>/dev/null || true
+}
+
 # Initialize firewall if not already done
 # This runs as root and only runs once per container lifecycle
 init_firewall() {
@@ -84,18 +110,6 @@ init_firewall() {
     fi
 }
 
-# Initialize wrapper symlinks
-# Creates symlinks in /scripts/wrappers that point to the dispatcher
-# This must run after firewall init and before dropping to claude user
-init_wrappers() {
-    log "Initializing command wrappers..."
-    if bridge --init-wrappers /scripts/wrappers 2>&1; then
-        log "Wrapper initialization complete"
-    else
-        log "Warning: Wrapper initialization failed"
-    fi
-}
-
 # Run a command as the claude user (if we're currently root)
 run_as_user() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -119,11 +133,11 @@ main() {
     # Initialize firewall on container start (runs once as root)
     init_firewall
 
-    # Initialize wrapper symlinks (runs once after firewall)
-    init_wrappers
-
     # Adjust claude user UID/GID if PUID/PGID env vars are set
     adjust_user_ids
+
+    # Seed auth + config into the persistent home volume (must run after UID adjust)
+    seed_claude_config
 
     # If arguments provided and first arg is "claude", run Claude
     if [ "$1" = "claude" ]; then
